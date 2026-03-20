@@ -18,5 +18,6 @@ document.getElementById('timeForm').addEventListener('submit', function(event) {
   const formattedLeaveTime = `${leaveTime.getHours().toString().padStart(2, '0')}:${leaveTime.getMinutes().toString().padStart(2, '0')}`;
 
   // Display result
-  document.getElementById('result').innerHTML = `Best time to leave for <strong>${destination}</strong> is at <strong>${formattedLeaveTime}</strong>.`;
+  const resultEl = document.getElementById('result');
+  resultEl.textContent = `Best time to leave for ${destination} is at ${formattedLeaveTime}.`;
 });

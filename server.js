@@ -4,24 +4,48 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const twilio = require('twilio');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 
-// Load environment variables from .env file
+// Validate required environment variables at startup
+const requiredEnvVars = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'GOOGLE_MAPS_API_KEY'];
+for (const key of requiredEnvVars) {
+    if (!process.env[key]) {
+        console.error(`Missing required environment variable: ${key}`);
+        process.exit(1);
+    }
+}
+
 const accountSid = process.env.TWILIO_ACCOUNT_SID;
 const authToken = process.env.TWILIO_AUTH_TOKEN;
 const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-// Create a new Twilio client using the environment variables
+// Create a new Twilio client
 const client = new twilio(accountSid, authToken);
 
 // Create an Express app
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // In-memory storage for user requests (replace with a database in a real application)
 let userRequests = [];
 
-// Middleware to parse JSON bodies
-app.use(express.json());
+// CORS - only allow requests from your own domain
+app.use(cors({
+    origin: process.env.ALLOWED_ORIGIN || 'http://localhost:3000',
+    methods: ['GET', 'POST'],
+}));
+
+// Rate limiting - max 10 requests per 15 minutes per IP
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { success: false, message: 'Too many requests, please try again later.' }
+});
+app.use('/api/', limiter);
+
+// Middleware to parse JSON bodies (limit size to prevent abuse)
+app.use(express.json({ limit: '10kb' }));
 
 // Add a route for the root path '/'
 app.get('/', (req, res) => {
@@ -33,19 +57,29 @@ app.post('/api/setNotification', (req, res, next) => {
     try {
         const { start, end, threshold, phoneNumber } = req.body;
 
-        // Validate input
+        // Validate required fields
         if (!start || !end || !threshold || !phoneNumber) {
-            throw new Error('Missing required fields');
+            return res.status(400).json({ success: false, message: 'Missing required fields' });
         }
 
-        // Store user request data (replace with database storage in a real app)
-        userRequests.push({ start, end, threshold, phoneNumber });
+        // Validate phone number format (E.164 format: +1XXXXXXXXXX)
+        const phoneRegex = /^\+[1-9]\d{7,14}$/;
+        if (!phoneRegex.test(phoneNumber)) {
+            return res.status(400).json({ success: false, message: 'Invalid phone number. Use E.164 format (e.g. +13051234567)' });
+        }
 
-        console.log('Notification request received:', { start, end, threshold, phoneNumber });
+        // Validate threshold is a positive number
+        const thresholdNum = Number(threshold);
+        if (isNaN(thresholdNum) || thresholdNum <= 0) {
+            return res.status(400).json({ success: false, message: 'Threshold must be a positive number' });
+        }
+
+        userRequests.push({ start, end, threshold: thresholdNum, phoneNumber });
+        console.log('Notification request received:', { start, end, threshold: thresholdNum, phoneNumber });
 
         res.json({ success: true });
     } catch (error) {
-        next(error); // Pass the error to the global error handler
+        next(error);
     }
 });
 
@@ -54,56 +88,43 @@ async function checkCommuteTime() {
     for (let request of userRequests) {
         const { start, end, threshold, phoneNumber } = request;
         try {
-            // Make a request to the Google Maps Directions API
             const response = await axios.get(
-                `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(start)}&destination=${encodeURIComponent(end)}&key=${googleMapsApiKey}`
+                `https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(start)}&destination=${encodeURIComponent(end)}&key=${googleMapsApiKey}`,
+                { timeout: 10000 }
             );
 
-            // Check if the response has any routes
-            if (response.data.routes.length === 0) {
+            if (!response.data.routes || response.data.routes.length === 0) {
                 throw new Error(`No routes found between ${start} and ${end}`);
             }
 
-            // Calculate the duration in minutes
             const durationInMinutes = response.data.routes[0].legs[0].duration.value / 60;
 
-            // Check if the commute time is below the user-defined threshold
             if (durationInMinutes <= threshold) {
-                // Send a text message using Twilio
-                await client.messages.create({
-                    body: `Good news! Your commute time from ${start} to ${end} is now ${Math.round(durationInMinutes)} minutes, which is below your set threshold of ${threshold} minutes.`,
+                const message = await client.messages.create({
+                    body: `Good news! Your commute from ${start} to ${end} is now ${Math.round(durationInMinutes)} minutes, below your threshold of ${threshold} minutes.`,
                     from: process.env.TWILIO_PHONE_NUMBER,
                     to: phoneNumber
                 });
-                console.log(`Text sent to ${phoneNumber}`);
+                console.log(`Text sent to ${phoneNumber}, SID: ${message.sid}`);
             }
         } catch (error) {
-            console.error(`Failed to get directions or send text: ${error.message}`);
-            // Optionally, you can pass the error to the next function for global handling
-            // next(error);
+            console.error(`Failed to check commute or send text: ${error.message}`);
         }
     }
 }
 
 // Set up an interval to check commute times every 5 minutes
-setInterval(checkCommuteTime, 300000); // 300000 ms = 5 minutes
+setInterval(checkCommuteTime, 300000);
 
 // Handle undefined routes (404)
 app.use((req, res) => {
-    res.status(404).json({
-        success: false,
-        message: 'Route not found'
-    });
+    res.status(404).json({ success: false, message: 'Route not found' });
 });
 
-// Global Error Handling Middleware
+// Global error handling middleware
 app.use((err, req, res, next) => {
-    console.error(err.stack); // Log the error stack trace for debugging
-    res.status(500).json({
-        success: false,
-        message: 'Internal Server Error',
-        error: err.message
-    });
+    console.error(err.stack);
+    res.status(500).json({ success: false, message: 'Internal Server Error' });
 });
 
 // Start the server
