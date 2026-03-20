@@ -72,7 +72,7 @@ async function checkCommuteTime() {
                 // Send a text message using Twilio
                 await client.messages.create({
                     body: `Good news! Your commute time from ${start} to ${end} is now ${Math.round(durationInMinutes)} minutes, which is below your set threshold of ${threshold} minutes.`,
-                    from: 'YOUR_TWILIO_PHONE_NUMBER', // Replace with your Twilio phone number
+                    from: process.env.TWILIO_PHONE_NUMBER,
                     to: phoneNumber
                 });
                 console.log(`Text sent to ${phoneNumber}`);
